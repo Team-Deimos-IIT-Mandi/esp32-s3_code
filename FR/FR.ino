@@ -1,6 +1,8 @@
+//FR
+
 /*
  * ESP32-S3 MINI – SINGLE MOTOR PID CONTROLLER (STEALTH SAFETY EDITION)
- * Team Deimos IIT Mandi
+ * Team Deimos IIT Mandi  
  */
 
 #include <Arduino.h>
@@ -18,23 +20,24 @@ Adafruit_NeoPixel statusLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 // ================== CAN CONFIG ==================
 #define CAN_TX_PIN GPIO_NUM_1
 #define CAN_RX_PIN GPIO_NUM_2
-#define CAN_ID_MOTOR 0x123   // CHANGE PER WHEEL
+#define CAN_ID_MOTOR 0x121   // CHANGE PER WHEEL
 
 // ================== MOTOR CONFIG =================
-#define ENCODER_A_PIN 5
-#define ENCODER_B_PIN 4
+#define ENCODER_A_PIN 4
+#define ENCODER_B_PIN 5
 #define PWM_PIN       10
 #define DIR_PIN       11
 #define PCNT_UNIT     PCNT_UNIT_0
-#define ENCODER_PPR   600
+#define ENCODER_PPR   400
 
 // ================== PID CONSTANTS =================
-#define KP 0.143
-#define KI 2.597
+#define KP 0.1418
+#define KI 2.683
 #define KD 0.0
 
-#define MOTOR_GAIN   9.9907
-#define MOTOR_OFFSET 150.7210
+#define MOTOR_GAIN   9.670
+#define MOTOR_OFFSET 350.574
+
 
 
 // ================== CONTROL PARAMS =================
@@ -295,7 +298,7 @@ void runPID() {
   float error = targetRPM - currentRPM;
 
   // If we are stopped and the wheel is TRULY still, relax the motor to save heat.
-  if (fabs(targetRPM) < 0.1 && fabs(currentRPM) < 2.0 && fabs(errorSum) < 1.0) {
+  if (fabs(targetRPM) < 0.1 && fabs(currentRPM) < 5.0 && fabs(errorSum) < 1.0) {
       ledcWrite(PWM_PIN, 0);
       currentPWM = 0;
       errorSum = 0; 
