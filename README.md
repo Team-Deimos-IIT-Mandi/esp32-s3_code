@@ -74,6 +74,18 @@ Motor Char: Adjust MOTOR_GAIN and MOTOR_OFFSET based on your specific motor's vo
 
 Limits: Update MAX_RPM and PWM_MAX to match your mechanical constraints.
 
+⚠️ Troubleshooting & Behaviors
+The "Sticky Integral" (Motor Hum at Standstill)
+Symptom: After manually pushing the rover while it is stopped, the motor continues to "hum" and consume power (driver LED on) even after you stop pushing. The wheel does not return to its original position.
+
+Cause: This controller uses a Velocity Loop (RPM), not a Position Loop.
+
+When you push the rover, the PID controller detects a velocity error (RPM ≠ 0) and increases the Integral (Ki) term to fight the movement.
+
+When you stop pushing, the velocity error returns to zero.
+
+However, the accumulated Integral value ("memory" of the push) remains charged because the velocity error is zero, leaving the motor in a tensed state.
+
 🛠 Usage
 Install Libraries: Ensure Adafruit_NeoPixel is installed in your Arduino Library Manager.
 
