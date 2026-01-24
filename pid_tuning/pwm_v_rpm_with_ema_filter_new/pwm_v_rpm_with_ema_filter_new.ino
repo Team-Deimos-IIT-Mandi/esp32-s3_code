@@ -12,8 +12,8 @@
 #include "driver/pcnt.h"
 
 // Pin Definitions
-#define ENCODER_A_PIN 4
-#define ENCODER_B_PIN 5
+#define ENCODER_A_PIN 5
+#define ENCODER_B_PIN 4
 #define PWM_PIN 10
 #define DIR_PIN 11
 
@@ -23,7 +23,7 @@
 #define PCNT_UNIT PCNT_UNIT_0  // PCNT unit to use
 
 // PWM Configuration
-#define PWM_FREQ 25000         // 25 kHz PWM frequency
+#define PWM_FREQ 20000         // 25 kHz PWM frequency
 #define PWM_RESOLUTION 8       // 8-bit resolution (0-255)
 
 // Timing Parameters
@@ -59,9 +59,7 @@ bool headerPrinted = false;
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    delay(10); 
-  }
+  
   delay(1000);
   
   // Initialize Direction Pin

@@ -1,11 +1,11 @@
 /*
- * ESP32-S3 SLAVE MOTOR CONTROLLER - FINAL CLEAN VERSION
- * Change ONLY: CAN_ID_MOTOR, CAN_ID_FEEDBACK, and PID values for each wheel
+ * ESP32-S3 SLAVE MOTOR CONTROLLER - SMOOTH TYRE RPM WITH NEW PID
+ * Change ONLY: CAN_ID_MOTOR, CAN_ID_FEEDBACK, ENCODER_PPR, GEAR_RATIO, and PID values
  * 
- * FL: CAN_ID_MOTOR=0x124, CAN_ID_FEEDBACK=0x224, ENCODER_PPR=400
- * FR: CAN_ID_MOTOR=0x121, CAN_ID_FEEDBACK=0x221, ENCODER_PPR=400
- * BR: CAN_ID_MOTOR=0x122, CAN_ID_FEEDBACK=0x222, ENCODER_PPR=400
- * BL: CAN_ID_MOTOR=0x123, CAN_ID_FEEDBACK=0x223, ENCODER_PPR=600
+ * FL: CAN_ID_MOTOR=0x124, CAN_ID_FEEDBACK=0x224, ENCODER_PPR=400, GEAR_RATIO=13.7
+ * FR: CAN_ID_MOTOR=0x121, CAN_ID_FEEDBACK=0x221, ENCODER_PPR=400, GEAR_RATIO=13.7
+ * BR: CAN_ID_MOTOR=0x122, CAN_ID_FEEDBACK=0x222, ENCODER_PPR=400, GEAR_RATIO=13.7
+ * BL: CAN_ID_MOTOR=0x123, CAN_ID_FEEDBACK=0x223, ENCODER_PPR=600, GEAR_RATIO=13.7
  */
 
 #include <Arduino.h>
@@ -14,16 +14,20 @@
 #include <Adafruit_NeoPixel.h>
 
 // ================== CHANGE FOR EACH WHEEL ==================
-#define CAN_ID_MOTOR     0x121   // Command ID
-#define CAN_ID_FEEDBACK  0x221   // Feedback ID
+#define CAN_ID_MOTOR     0x122   // Command ID
+#define CAN_ID_FEEDBACK  0x222   // Feedback ID
 #define ENCODER_PPR      400     // Encoder pulses per revolution
+#define GEAR_RATIO       13.7    // Motor to Tyre gear ratio
 
 // PID Constants (FR values shown - CHANGE FOR EACH WHEEL)
-#define KP 0.1418
-#define KI 2.683
-#define KD 0.0
-#define MOTOR_GAIN   9.670
-#define MOTOR_OFFSET 350.574
+#define KP 0.3
+#define KI 1.0
+#define KD 0.01
+#define MOTOR_GAIN   0.7632
+#define MOTOR_OFFSET 13.41
+
+// Motion Profile (Smoothness)
+#define ACCELERATION_STEP 150.0  // Tyre RPM change per control loop (adjust for smoothness)
 // ===========================================================
 
 // ================== RGB LED CONFIG ==================
@@ -48,22 +52,21 @@ Adafruit_NeoPixel statusLed(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 #define PWM_FREQ         25000
 #define PWM_RESOLUTION   8
 #define PWM_MAX          255
+#define PWM_MIN          0
 #define MIN_PWM_OUTPUT   20
 
 #define RPM_SAMPLE_TIME_MS   50
 #define CONTROL_LOOP_TIME_MS 50
 #define EMA_ALPHA            0.3
-#define RPM_DEADBAND         5.0
+#define RPM_DEADBAND         5.0   // Keep original deadband (in motor RPM)
 #define INTEGRAL_LIMIT       1000.0
 
-#define MAX_CAN_SPEED 1000
-#define MAX_RPM       2500
+#define MAX_RPM       182.48  // Max tyre RPM (2500 motor RPM / 13.7)
 #define CAN_TIMEOUT_MS 500
 
 // ================== CAN STRUCTS ==================
 typedef struct {
-  int16_t speed;
-  int8_t  direction;
+  float target_rpm;  // Now in TYRE RPM (not motor RPM)
 } __attribute__((packed)) motor_cmd_t;
 
 typedef struct {
@@ -72,9 +75,10 @@ typedef struct {
 } __attribute__((packed)) motor_feedback_t;
 
 // ================== VARIABLES ==================
-float targetRPM = 0.0;
-float currentRPM = 0.0;
-float filteredRPM = 0.0;
+float finalTargetTyreRPM = 0.0;   // Final destination (from CAN)
+float activeTargetTyreRPM = 0.0;  // Moving target (ramped)
+float currentMotorRPM = 0.0;      // Current motor speed
+float filteredMotorRPM = 0.0;
 
 float errorSum = 0.0;
 float lastError = 0.0;
@@ -100,6 +104,7 @@ void sendFeedback();
 void checkCANTimeout();
 void initPCNT();
 void measureRPM();
+void updateSetpoint();
 void runPID();
 float calculateRPM(int16_t count);
 void updateLED();
@@ -109,7 +114,7 @@ void setup() {
   pinMode(PWM_PIN, OUTPUT);
   digitalWrite(PWM_PIN, LOW);
   pinMode(DIR_PIN, OUTPUT);
-  digitalWrite(DIR_PIN, LOW);
+  digitalWrite(DIR_PIN, HIGH);
 
   Serial.begin(115200);
   delay(500);
@@ -138,7 +143,7 @@ void setup() {
   statusLed.fill(statusLed.Color(0, 255, 0)); // Green = ready
   statusLed.show();
 
-  Serial.println("✓ Slave Ready");
+  Serial.println("✓ Slave Ready - Smooth Tyre RPM Control");
 }
 
 // ================== LOOP ==================
@@ -154,6 +159,7 @@ void loop() {
   }
 
   if (now - lastControlTime >= CONTROL_LOOP_TIME_MS) {
+    updateSetpoint();  // Ramp the target
     runPID();
     lastControlTime += CONTROL_LOOP_TIME_MS;
   }
@@ -193,10 +199,8 @@ void processCAN() {
     motor_cmd_t cmd;
     memcpy(&cmd, msg.data, sizeof(cmd));
 
-    float rpm = ((float)cmd.speed * MAX_RPM) / MAX_CAN_SPEED;
-    if (cmd.direction == 0) rpm = -rpm;
-
-    targetRPM = rpm;
+    // Receive TYRE RPM directly
+    finalTargetTyreRPM = cmd.target_rpm;
     lastCANUpdate = millis();
   }
 }
@@ -204,7 +208,7 @@ void processCAN() {
 void sendFeedback() {
   motor_feedback_t fb;
   fb.position = globalEncoderTicks * TICKS_TO_RAD;
-  fb.velocity = currentRPM * RPM_TO_RADS;
+  fb.velocity = (currentMotorRPM / GEAR_RATIO) * RPM_TO_RADS;  // Send tyre velocity
 
   twai_message_t msg = {};
   msg.identifier = CAN_ID_FEEDBACK;
@@ -216,7 +220,7 @@ void sendFeedback() {
 
 void checkCANTimeout() {
   if (millis() - lastCANUpdate > CAN_TIMEOUT_MS) {
-    targetRPM = 0;
+    finalTargetTyreRPM = 0;
     canTimeoutDetected = true;
   } else {
     canTimeoutDetected = false;
@@ -238,6 +242,23 @@ void initPCNT() {
     .channel        = PCNT_CHANNEL_0
   };
   pcnt_unit_config(&ch0);
+  
+  pcnt_config_t ch1 = {
+    .pulse_gpio_num = ENCODER_B_PIN,
+    .ctrl_gpio_num  = ENCODER_A_PIN,
+    .lctrl_mode     = PCNT_MODE_KEEP,
+    .hctrl_mode     = PCNT_MODE_REVERSE,
+    .pos_mode       = PCNT_COUNT_DEC,
+    .neg_mode       = PCNT_COUNT_INC,
+    .counter_h_lim  = 32767,
+    .counter_l_lim  = -32768,
+    .unit           = PCNT_UNIT,
+    .channel        = PCNT_CHANNEL_1
+  };
+  pcnt_unit_config(&ch1);
+  
+  pcnt_set_filter_value(PCNT_UNIT, 100);
+  pcnt_filter_enable(PCNT_UNIT);
   pcnt_counter_clear(PCNT_UNIT);
   pcnt_counter_resume(PCNT_UNIT);
 }
@@ -245,18 +266,18 @@ void initPCNT() {
 void measureRPM() {
   int16_t count;
   pcnt_get_counter_value(PCNT_UNIT, &count);
-  globalEncoderTicks += count;  // Track absolute position
+  globalEncoderTicks += count;
   pcnt_counter_clear(PCNT_UNIT);
 
   float rawRPM = calculateRPM(count);
 
   if (firstRPM) {
-    filteredRPM = rawRPM;
+    filteredMotorRPM = rawRPM;
     firstRPM = false;
   } else {
-    filteredRPM = EMA_ALPHA * rawRPM + (1.0 - EMA_ALPHA) * filteredRPM;
+    filteredMotorRPM = EMA_ALPHA * rawRPM + (1.0 - EMA_ALPHA) * filteredMotorRPM;
   }
-  currentRPM = filteredRPM;
+  currentMotorRPM = filteredMotorRPM;
 }
 
 float calculateRPM(int16_t count) {
@@ -264,12 +285,31 @@ float calculateRPM(int16_t count) {
   return (float)count * 60000.0 / (CPR * RPM_SAMPLE_TIME_MS);
 }
 
+// ================== MOTION PROFILING ==================
+void updateSetpoint() {
+  // Ramp the active target towards final target
+  if (activeTargetTyreRPM < finalTargetTyreRPM) {
+    activeTargetTyreRPM += ACCELERATION_STEP;
+    if (activeTargetTyreRPM > finalTargetTyreRPM) {
+      activeTargetTyreRPM = finalTargetTyreRPM;
+    }
+  } else if (activeTargetTyreRPM > finalTargetTyreRPM) {
+    activeTargetTyreRPM -= ACCELERATION_STEP;
+    if (activeTargetTyreRPM < finalTargetTyreRPM) {
+      activeTargetTyreRPM = finalTargetTyreRPM;
+    }
+  }
+}
+
 // ================== PID ==================
 void runPID() {
-  float error = targetRPM - currentRPM;
+  // Convert active tyre target to motor RPM for PID
+  float activeTargetMotorRPM = activeTargetTyreRPM * GEAR_RATIO;
+  
+  float error = activeTargetMotorRPM - currentMotorRPM;
 
   // Stop condition - RESET integral when stopped
-  if (fabs(targetRPM) < 0.1 && fabs(currentRPM) < 5.0) {
+  if (fabs(activeTargetMotorRPM) < 0.1 && fabs(currentMotorRPM) < 5.0) {
     ledcWrite(PWM_PIN, 0);
     currentPWM = 0;
     errorSum = 0;
@@ -277,51 +317,58 @@ void runPID() {
     return;
   }
 
-  // ANTI-WINDUP: If actual RPM has opposite sign from target, reset integral
-  // This prevents windup when motor is manually forced backwards
-  if ((targetRPM > 0 && currentRPM < -50) || (targetRPM < 0 && currentRPM > 50)) {
-    errorSum = 0;  // Reset integral when fighting external force
-  }
-
-  // ANTI-WINDUP: If error is huge (>500 RPM), likely external interference
-  if (fabs(error) > 500) {
-    errorSum *= 0.5;  // Decay integral quickly
-  }
-
   if (fabs(error) < RPM_DEADBAND) error = 0;
 
-  float p = KP * error;
+  // Proportional
+  float pTerm = KP * error;
 
-  // Standard anti-windup during saturation
-  bool saturated = (currentPWM >= PWM_MAX && error > 0) || 
-                   (currentPWM <= -PWM_MAX && error < 0);
-
-  if (!saturated) {
-    errorSum += error * (CONTROL_LOOP_TIME_MS / 1000.0);
-    errorSum = constrain(errorSum, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  // Integral with anti-windup (conditional integration)
+  float proposedErrorSum = errorSum + (error * (CONTROL_LOOP_TIME_MS / 1000.0));
+  float futureI = KI * proposedErrorSum;
+  float dTermCheck = KD * ((error - lastError) / (CONTROL_LOOP_TIME_MS / 1000.0));
+  
+  // Feedforward
+  float absTargetTyre = fabs(activeTargetTyreRPM);
+  float ffMag = (absTargetTyre > 0.1) ? ((absTargetTyre / MOTOR_GAIN) + MOTOR_OFFSET) : 0;
+  float ff = (activeTargetMotorRPM >= 0) ? ffMag : -ffMag;
+  
+  float estimatedOutput = pTerm + futureI + dTermCheck + ff;
+  
+  // Anti-windup: only integrate if not saturated or if integrating helps
+  if (estimatedOutput >= -255 && estimatedOutput <= 255) {
+    errorSum = proposedErrorSum;
+  } else if (estimatedOutput > 255 && error < 0) {
+    errorSum = proposedErrorSum;
+  } else if (estimatedOutput < -255 && error > 0) {
+    errorSum = proposedErrorSum;
   }
+  
+  errorSum = constrain(errorSum, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  
+  float iTerm = KI * errorSum;
 
-  float i = KI * errorSum;
-  float d = KD * (error - lastError);
+  // Derivative
+  float dTerm = KD * (error - lastError);
 
-  float ffMag = (fabs(targetRPM) + MOTOR_OFFSET) / MOTOR_GAIN;
-  float ff = (targetRPM >= 0) ? ffMag : -ffMag;
+  float pidOutput = pTerm + iTerm + dTerm;
+  float totalControl = ff + pidOutput;
 
-  float control = ff + p + i + d;
+  int calculatedPWM = (int)totalControl;
 
-  if (control >= 0) {
+  // Direction and PWM
+  if (calculatedPWM >= 0) {
     digitalWrite(DIR_PIN, HIGH);
-    currentPWM = (int)control;
+    currentPWM = calculatedPWM;
   } else {
     digitalWrite(DIR_PIN, LOW);
-    currentPWM = (int)fabs(control);
+    currentPWM = abs(calculatedPWM);
   }
 
   if (currentPWM > 0 && currentPWM < MIN_PWM_OUTPUT) {
     currentPWM = MIN_PWM_OUTPUT;
   }
 
-  currentPWM = constrain(currentPWM, 0, PWM_MAX);
+  currentPWM = constrain(currentPWM, PWM_MIN, PWM_MAX);
   ledcWrite(PWM_PIN, currentPWM);
 
   lastError = error;
@@ -334,7 +381,7 @@ void updateLED() {
   if (canTimeoutDetected) {
     // Solid MAGENTA = No CAN commands
     color = statusLed.Color(255, 0, 255);
-  } else if (targetRPM != 0) {
+  } else if (fabs(finalTargetTyreRPM) > 0.1) {
     // Solid BLUE = Motor running
     color = statusLed.Color(0, 0, 255);
   } else {
